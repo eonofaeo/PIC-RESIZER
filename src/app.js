@@ -1,11 +1,13 @@
 import {
   LIMITS, renameExtension, makeUniqueName, computeTargetSize,
-  computeDrawPlan, validateCanvasSize
+  computeDrawPlan, validateCanvasSize, parseTargetBytes,
+  encodeWithQualityBudget, nextBudgetScaleSize
 } from './core.js';
 
 import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
 import * as pdfjsLib from 'pdfjs-dist';
+import { removeImageBackground } from './bg.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'assets/pdf.worker.min.mjs';
 
@@ -32,6 +34,19 @@ let processingId = 0;
 let isProcessing = false;
 
 function getSettings() {
+  const targetSizeEnabled = $('targetSizeEnabled').checked;
+  let targetBytes = null;
+  if (targetSizeEnabled) {
+    const val = parseInt($('targetSizeValue').value, 10);
+    const unit = $('targetSizeUnit').value;
+    try {
+      targetBytes = parseTargetBytes(val, unit);
+    } catch (e) {
+      targetBytes = null;
+    }
+  }
+  const presetSelect = $('presetSelect');
+  const presetFit = presetSelect.dataset?.fitBehavior || 'stretch';
   return {
     sizeMode: document.querySelector('.seg-btn.active')?.dataset.mode || 'original',
     percentage: parseInt($('pctRange').value, 10) || 100,
@@ -41,7 +56,12 @@ function getSettings() {
     neverEnlarge: false,
     format: $('formatSelect').value,
     quality: parseInt($('qualityRange').value, 10) || 85,
-    fitBehavior: 'stretch'
+    fitBehavior: presetFit,
+    targetEnabled: targetSizeEnabled,
+    targetBytes,
+    removeBg: $('removeBgEnabled').checked,
+    bgFillMode: $('bgFillMode').value,
+    bgFillColor: $('bgFillColor').value
   };
 }
 
@@ -86,10 +106,15 @@ function updateFormatHint() {
 function updateQualityUI() {
   const settings = getSettings();
   const disabled = settings.format === 'png';
-  $('qualityRange').disabled = disabled;
-  $('qualityHint').textContent = disabled
-    ? 'PNG is lossless — quality doesn\u2019t apply here.'
-    : 'Lower quality means a smaller file.';
+  const targetMode = settings.targetEnabled;
+  $('qualityRange').disabled = disabled || targetMode;
+  if (targetMode) {
+    $('qualityHint').textContent = 'Quality auto-adjusts to meet target size. Prefer JPG or WebP.';
+  } else if (disabled) {
+    $('qualityHint').textContent = 'PNG is lossless — quality doesn\u2019t apply here.';
+  } else {
+    $('qualityHint').textContent = 'Lower quality means a smaller file.';
+  }
 }
 
 function updateProcessLabel() {
@@ -268,10 +293,108 @@ async function addFiles(fileList) {
   updateProcessLabel();
 }
 
+/**
+ * Encode a canvas to a byte budget.
+ * - JPG/WebP: binary-search quality, then scale down if still over budget.
+ * - PNG: no quality knob — single encode, then scale down only.
+ * Cleans up all working canvases. Returns { blob, metBudget }.
+ */
+async function encodeCanvasToBudget(canvas, mime, effectiveFmt, targetBytes, fitBehavior, sourceW, sourceH) {
+  const minQ = 0.1;
+  const maxQ = 0.95;
+  const isPng = effectiveFmt === 'png';
+
+  let blob;
+  let metBudget = false;
+
+  // Phase 1: Quality search (skip for PNG — no quality knob, only scale-down applies)
+  if (isPng) {
+    blob = await new Promise(res => canvas.toBlob(res, mime));
+    metBudget = Boolean(blob && blob.size <= targetBytes);
+  } else {
+    const encode = (q) => new Promise(res => canvas.toBlob(res, mime, q));
+    const result = await encodeWithQualityBudget(encode, targetBytes, { minQ, maxQ });
+    blob = result.blob;
+    metBudget = result.metBudget;
+  }
+
+  // Phase 2: Scale down iteratively if still over budget
+  if (!metBudget && blob) {
+    let curW = canvas.width;
+    let curH = canvas.height;
+    let curCanvas = canvas;
+    for (let attempt = 0; attempt < 8 && curW > 10 && curH > 10; attempt++) {
+      const next = nextBudgetScaleSize(curW, curH, 0.9);
+      curW = next.width;
+      curH = next.height;
+      if (curW < 10 || curH < 10) break;
+      validateCanvasSize(curW, curH);
+      const newCanvas = document.createElement('canvas');
+      newCanvas.width = curW;
+      newCanvas.height = curH;
+      const newCtx = newCanvas.getContext('2d');
+      if (effectiveFmt === 'jpg' || effectiveFmt === 'pdf') {
+        newCtx.fillStyle = '#ffffff';
+        newCtx.fillRect(0, 0, curW, curH);
+      }
+      const newDrawPlan = computeDrawPlan(sourceW, sourceH, curW, curH, fitBehavior);
+      newCtx.drawImage(
+        curCanvas,
+        newDrawPlan.sx, newDrawPlan.sy, newDrawPlan.sw, newDrawPlan.sh,
+        newDrawPlan.dx, newDrawPlan.dy, newDrawPlan.dw, newDrawPlan.dh
+      );
+      curCanvas.width = 0;
+      curCanvas.height = 0;
+      curCanvas = newCanvas;
+      if (isPng) {
+        blob = await new Promise(res => curCanvas.toBlob(res, mime));
+        metBudget = Boolean(blob && blob.size <= targetBytes);
+      } else {
+        const retryResult = await encodeWithQualityBudget(
+          (q) => new Promise(res => curCanvas.toBlob(res, mime, q)),
+          targetBytes,
+          { minQ, maxQ }
+        );
+        blob = retryResult.blob;
+        metBudget = retryResult.metBudget;
+      }
+      if (metBudget) break;
+    }
+    curCanvas.width = 0;
+    curCanvas.height = 0;
+  } else {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  return { blob, metBudget };
+}
+
 async function processSingleImage(fo, settings, jobId) {
   if (processingId !== jobId) return null;
-  const img = fo.imgEl;
-  const target = computeTargetSize(fo.naturalWidth, fo.naturalHeight, settings);
+
+  let img = fo.imgEl;
+  const naturalWidth = fo.naturalWidth;
+  const naturalHeight = fo.naturalHeight;
+
+  // Background removal (pre-process)
+  if (settings.removeBg) {
+    try {
+      statusText.textContent = 'Removing background…';
+      const bgBlob = await removeImageBackground(fo.file, (key, current, total) => {
+        if (processingId !== jobId) return;
+        statusText.textContent = 'Removing background… ' + Math.round((current / total) * 100) + '%';
+      });
+      const bgUrl = URL.createObjectURL(bgBlob);
+      const bgImg = await loadImage(bgUrl);
+      URL.revokeObjectURL(bgUrl);
+      img = bgImg;
+    } catch (e) {
+      showToast('Background removal failed for "' + fo.name + '". Continuing without it.');
+    }
+  }
+
+  const target = computeTargetSize(naturalWidth, naturalHeight, settings);
   const w = target.width;
   const h = target.height;
   const effectiveFmt = settings.format === 'keep' ? guessFormatFromMime(fo.type) : settings.format;
@@ -283,11 +406,29 @@ async function processSingleImage(fo, settings, jobId) {
   canvas.height = h;
   const ctx = canvas.getContext('2d');
 
-  const drawPlan = computeDrawPlan(fo.naturalWidth, fo.naturalHeight, w, h, settings.fitBehavior);
-  if (effectiveFmt === 'jpg' || effectiveFmt === 'pdf') {
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, w, h);
+  const drawPlan = computeDrawPlan(naturalWidth, naturalHeight, w, h, settings.fitBehavior);
+
+  // Determine fill color for background
+  let fillColor = '#ffffff';
+  if (settings.removeBg && settings.bgFillMode) {
+    if (settings.bgFillMode === 'transparent') {
+      fillColor = null; // No fill, keep transparency
+    } else if (settings.bgFillMode === 'custom') {
+      fillColor = settings.bgFillColor;
+    }
   }
+
+  // Fill background if needed (for JPG/PDF or when explicit fill color)
+  if (effectiveFmt === 'jpg' || effectiveFmt === 'pdf' || fillColor) {
+    if (fillColor) {
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(0, 0, w, h);
+    } else if (effectiveFmt === 'jpg' || effectiveFmt === 'pdf') {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+
   ctx.drawImage(
     img,
     drawPlan.sx, drawPlan.sy, drawPlan.sw, drawPlan.sh,
@@ -313,10 +454,22 @@ async function processSingleImage(fo, settings, jobId) {
   }
 
   const mime = effectiveFmt === 'png' ? 'image/png' : effectiveFmt === 'webp' ? 'image/webp' : 'image/jpeg';
-  const qArg = effectiveFmt === 'png' ? undefined : settings.quality / 100;
-  const blob = await new Promise(res => canvas.toBlob(res, mime, qArg));
-  canvas.width = 0;
-  canvas.height = 0;
+
+  let blob;
+  if (settings.targetEnabled && settings.targetBytes) {
+    const { blob: budgetBlob, metBudget } = await encodeCanvasToBudget(
+      canvas, mime, effectiveFmt, settings.targetBytes, settings.fitBehavior, w, h
+    );
+    blob = budgetBlob;
+    if (!metBudget && blob) {
+      showToast('Could not reach target size for "' + fo.name + '". Best effort: ' + formatBytes(blob.size) + '.');
+    }
+  } else {
+    const qArg = effectiveFmt === 'png' ? undefined : settings.quality / 100;
+    blob = await new Promise(res => canvas.toBlob(res, mime, qArg));
+    canvas.width = 0;
+    canvas.height = 0;
+  }
 
   if (!blob) throw new Error('Encoding failed');
   const url = URL.createObjectURL(blob);
@@ -388,10 +541,22 @@ async function processSinglePdf(fo, settings, jobId) {
     renderCanvas.height = 0;
 
     const mime = effectiveFmt === 'png' ? 'image/png' : effectiveFmt === 'webp' ? 'image/webp' : 'image/jpeg';
-    const qArg = effectiveFmt === 'png' ? undefined : settings.quality / 100;
-    const blob = await new Promise(res => canvas.toBlob(res, mime, qArg));
-    canvas.width = 0;
-    canvas.height = 0;
+
+    let blob;
+    if (settings.targetEnabled && settings.targetBytes) {
+      const { blob: budgetBlob, metBudget } = await encodeCanvasToBudget(
+        canvas, mime, effectiveFmt, settings.targetBytes, settings.fitBehavior, w, h
+      );
+      blob = budgetBlob;
+      if (!metBudget && blob) {
+        showToast('Could not reach target size for page ' + i + ' of "' + fo.name + '". Best effort: ' + formatBytes(blob.size) + '.');
+      }
+    } else {
+      const qArg = effectiveFmt === 'png' ? undefined : settings.quality / 100;
+      blob = await new Promise(res => canvas.toBlob(res, mime, qArg));
+      canvas.width = 0;
+      canvas.height = 0;
+    }
 
     if (!blob) throw new Error('Encoding failed for page ' + i);
     const url = URL.createObjectURL(blob);
@@ -608,12 +773,17 @@ $('aspectLock').addEventListener('change', function () {
 
 $('presetSelect').addEventListener('change', function () {
   if (!this.value) return;
-  const [w, h] = this.value.split(',').map(Number);
+  const parts = this.value.split(',').map(Number);
+  const w = parts[0];
+  const h = parts[1];
+  const fit = parts[2] === 1 || this.value.includes(',fill') ? 'fill' : 'stretch';
   sizeSeg.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'pixels'));
   Object.keys(panels).forEach(k => panels[k].hidden = (k !== 'pixels'));
   $('pxWidth').value = w;
   $('pxHeight').value = h;
   $('aspectLock').checked = false;
+  // Store fitBehavior on the select for getSettings to pick up
+  this.dataset.fitBehavior = fit;
   invalidateResults();
   updateProcessLabel();
 });
@@ -626,6 +796,30 @@ $('formatSelect').addEventListener('change', () => {
 
 $('qualityRange').addEventListener('input', function () {
   $('qualityVal').textContent = this.value;
+  invalidateResults();
+});
+
+$('targetSizeEnabled').addEventListener('change', function () {
+  $('targetSizeRow').hidden = !this.checked;
+  invalidateResults();
+  updateQualityUI();
+});
+
+$('targetSizeValue').addEventListener('input', function () {
+  invalidateResults();
+});
+
+$('targetSizeUnit').addEventListener('change', function () {
+  invalidateResults();
+});
+
+$('removeBgEnabled').addEventListener('change', function () {
+  $('bgFillWrap').hidden = !this.checked;
+  invalidateResults();
+});
+
+$('bgFillMode').addEventListener('change', function () {
+  $('bgFillColor').hidden = this.value !== 'custom';
   invalidateResults();
 });
 

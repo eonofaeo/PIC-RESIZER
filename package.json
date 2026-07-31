@@ -9,6 +9,7 @@
     "check": "npm run test && npm run build"
   },
   "dependencies": {
+    "@imgly/background-removal": "^1.7.0",
     "jspdf": "4.2.1",
     "jszip": "3.10.1",
     "pdfjs-dist": "4.10.38"

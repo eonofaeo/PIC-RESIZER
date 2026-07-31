@@ -5,7 +5,10 @@ import {
   computeTargetSize,
   makeUniqueName,
   renameExtension,
-  validateCanvasSize
+  validateCanvasSize,
+  parseTargetBytes,
+  encodeWithQualityBudget,
+  nextBudgetScaleSize
 } from '../src/core.js';
 
 test('renames extensions and strips path components', () => {
@@ -85,4 +88,65 @@ test('fit plan centers content for portrait target', () => {
   assert.equal(plan.dh, 281.25);
   assert.equal(plan.dx, 0);
   assert.equal(Math.round(plan.dy), 359);
+});
+
+test('parseTargetBytes converts KB to bytes', () => {
+  assert.equal(parseTargetBytes(1, 'KB'), 1024);
+  assert.equal(parseTargetBytes(100, 'KB'), 102400);
+  assert.equal(parseTargetBytes(200.5, 'KB'), 205312);
+});
+
+test('parseTargetBytes converts MB to bytes', () => {
+  assert.equal(parseTargetBytes(1, 'MB'), 1048576);
+  assert.equal(parseTargetBytes(0.5, 'MB'), 524288);
+  assert.equal(parseTargetBytes(50, 'MB'), 52428800);
+});
+
+test('parseTargetBytes rejects invalid inputs', () => {
+  assert.throws(() => parseTargetBytes(0, 'KB'), /positive/);
+  assert.throws(() => parseTargetBytes(-1, 'KB'), /positive/);
+  assert.throws(() => parseTargetBytes('abc', 'KB'), /positive/);
+  assert.throws(() => parseTargetBytes(0.5, 'KB'), /at least 1 KB/);
+  assert.throws(() => parseTargetBytes(51, 'MB'), /50 MB/);
+});
+
+test('nextBudgetScaleSize reduces dimensions by factor', () => {
+  assert.deepEqual(nextBudgetScaleSize(1000, 800, 0.9), { width: 900, height: 720 });
+  assert.deepEqual(nextBudgetScaleSize(100, 100, 0.5), { width: 50, height: 50 });
+  assert.deepEqual(nextBudgetScaleSize(1, 1, 0.9), { width: 1, height: 1 });
+});
+
+test('encodeWithQualityBudget returns high quality blob when already under budget', async () => {
+  let calls = 0;
+  const encode = async (q) => {
+    calls++;
+    return new Blob(['x'.repeat(100)], { type: 'image/jpeg' });
+  };
+  const result = await encodeWithQualityBudget(encode, 10000, { minQ: 0.1, maxQ: 0.95, steps: 8 });
+  assert.ok(result.metBudget);
+  assert.equal(result.quality, 0.95);
+  assert.equal(calls, 1);
+});
+
+test('encodeWithQualityBudget binary searches quality', async () => {
+  let calls = 0;
+  const encode = async (q) => {
+    calls++;
+    // Size increases with quality (matches real JPEG behavior)
+    const size = Math.round(2000 * q);
+    return new Blob(['x'.repeat(size)], { type: 'image/jpeg' });
+  };
+  const result = await encodeWithQualityBudget(encode, 1000, { minQ: 0.1, maxQ: 0.95, steps: 8 });
+  assert.ok(calls > 1 && calls <= 9);
+  assert.ok(result.quality >= 0.1 && result.quality <= 0.95);
+});
+
+test('encodeWithQualityBudget returns best effort at minQ when over budget', async () => {
+  const encode = async (q) => {
+    // Always return a large blob
+    return new Blob(['x'.repeat(100000)], { type: 'image/jpeg' });
+  };
+  const result = await encodeWithQualityBudget(encode, 1000, { minQ: 0.1, maxQ: 0.95, steps: 8 });
+  assert.ok(!result.metBudget);
+  assert.equal(result.quality, 0.1);
 });

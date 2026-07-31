@@ -282,7 +282,24 @@ html[data-theme="dark"] .file-thumb.pdf{ color:var(--accent); }
 .deck-head h2{ font-size:18px; }
 .deck-head span{ font-family:var(--font-mono); font-size:12px; color:var(--ink-faint); }
 .deck-grid{ display:grid; grid-template-columns:1.3fr 1fr 1fr; gap:22px; }
-@media (max-width:760px){ .deck-grid{ grid-template-columns:1fr; } }
+.deck-tools{ grid-column:1 / -1; display:grid; grid-template-columns:1fr 1fr; gap:22px; padding-top:4px; }
+@media (max-width:760px){
+  .deck-grid{ grid-template-columns:1fr; }
+  .deck-tools{ grid-template-columns:1fr; }
+}
+.target-row{ display:flex; align-items:center; gap:10px; margin-top:10px; }
+.target-row input[type="number"]{
+  flex:1; min-width:0; padding:10px 12px; border-radius:10px; border:1px solid var(--glass-border);
+  background:var(--glass-strong); color:var(--ink); font-family:var(--font-mono); font-size:14px;
+}
+.target-row select.glass-select{ width:auto; min-width:88px; flex:none; }
+.tools-row{ display:flex; flex-wrap:wrap; align-items:center; gap:14px 18px; }
+.bg-fill-wrap{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.bg-fill-wrap select.glass-select{ width:auto; min-width:140px; }
+.bg-fill-wrap input[type="color"]{
+  width:40px; height:36px; padding:2px; border-radius:10px; border:1px solid var(--glass-border);
+  background:var(--glass-strong); cursor:pointer;
+}
 
 .field-label{
   display:block; font-size:12px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;
@@ -556,12 +573,20 @@ footer .fbrand{ font-family:var(--font-display); font-weight:700; color:var(--in
           <div class="preset-row">
             <select class="glass-select" id="presetSelect">
               <option value="">Preset sizes…</option>
-              <option value="1080,1080">Instagram Post — 1080 × 1080</option>
-              <option value="1080,1920">Instagram Story — 1080 × 1920</option>
-              <option value="512,512">Profile Picture — 512 × 512</option>
-              <option value="1920,1080">HD — 1920 × 1080</option>
-              <option value="3840,2160">4K — 3840 × 2160</option>
+              <optgroup label="Passport &amp; ID">
+                <option value="600,600,fill">US Passport / Visa — 600 × 600</option>
+                <option value="413,531,fill">ICAO / EU / India — 413 × 531</option>
+                <option value="350,350,fill">Passport Soft Copy — 350 × 350</option>
+              </optgroup>
+              <optgroup label="Social &amp; Display">
+                <option value="1080,1080">Instagram Post — 1080 × 1080</option>
+                <option value="1080,1920">Instagram Story — 1080 × 1920</option>
+                <option value="512,512">Profile Picture — 512 × 512</option>
+                <option value="1920,1080">HD — 1920 × 1080</option>
+                <option value="3840,2160">4K — 3840 × 2160</option>
+              </optgroup>
             </select>
+            <p class="hint" id="presetHint">Passport presets crop to fill the official frame.</p>
           </div>
         </div>
       </div>
@@ -585,6 +610,46 @@ footer .fbrand{ font-family:var(--font-display); font-weight:700; color:var(--in
           <span class="range-val"><span id="qualityVal">85</span>%</span>
         </div>
         <p class="hint" id="qualityHint">Lower quality means a smaller file.</p>
+
+        <div class="lock-row" style="margin-top:14px">
+          <span class="switch">
+            <input type="checkbox" id="targetSizeEnabled" />
+            <span class="track"></span>
+          </span>
+          <label for="targetSizeEnabled">Limit file size</label>
+        </div>
+        <div class="target-row" id="targetSizeRow" hidden>
+          <input type="number" id="targetSizeValue" min="1" step="1" value="200" aria-label="Target file size" />
+          <select class="glass-select" id="targetSizeUnit" aria-label="Size unit">
+            <option value="KB" selected>KB</option>
+            <option value="MB">MB</option>
+          </select>
+        </div>
+        <p class="hint" id="targetSizeHint">Optional. Auto-adjusts quality (and scales down if needed). Prefer JPG or WebP.</p>
+      </div>
+
+      <div class="deck-tools">
+        <div class="field-group">
+          <span class="field-label">Background</span>
+          <div class="tools-row">
+            <div class="lock-row" style="margin:0">
+              <span class="switch">
+                <input type="checkbox" id="removeBgEnabled" />
+                <span class="track"></span>
+              </span>
+              <label for="removeBgEnabled">Remove background</label>
+            </div>
+            <div class="bg-fill-wrap" id="bgFillWrap" hidden>
+              <select class="glass-select" id="bgFillMode" aria-label="Background fill">
+                <option value="white">White fill</option>
+                <option value="transparent">Transparent</option>
+                <option value="custom">Custom color</option>
+              </select>
+              <input type="color" id="bgFillColor" value="#ffffff" hidden aria-label="Custom fill color" />
+            </div>
+          </div>
+          <p class="hint" id="bgHint">Runs on your device. First use downloads a small AI model. Ideal with passport + white fill.</p>
+        </div>
       </div>
     </div>
 
