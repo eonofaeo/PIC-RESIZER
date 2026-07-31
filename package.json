@@ -1,0 +1,19 @@
+{
+  "name": "glaze-image-resizer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "check": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "jspdf": "4.2.1",
+    "jszip": "3.10.1",
+    "pdfjs-dist": "4.10.38"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
+  }
+}
